@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { priority } from '../domain/priority'
 import { STAGES, stageLabel } from '../domain/stages'
 import { userName } from '../domain/users'
@@ -12,7 +12,11 @@ export function DetailPanel() {
   const row = useApp((a) => (a.activeId ? a.getRow(a.activeId) : undefined))
   const now = useApp((a) => a.view.now)
   const [value, setValue] = useState('')
-  useEffect(() => setValue(row ? String(row.deal.valueInr) : ''), [row?.deal.valueInr, id]) // eslint-disable-line react-hooks/exhaustive-deps
+  const editing = useRef(false)
+  // A teammate's change must never overwrite text the user is typing (open edits are pinned).
+  useEffect(() => {
+    if (!editing.current) setValue(row ? String(row.deal.valueInr) : '')
+  }, [row?.deal.valueInr, id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const close = () => {
     app.setUi({ detailOpen: false, gridFocus: app.ui.gridFocus + 1 })
@@ -67,7 +71,7 @@ export function DetailPanel() {
       <h3>Stage</h3>
       <div className="stage-buttons" role="group" aria-label="Move to stage">
         {STAGES.map((s) => (
-          <button key={s.id} className={`btn small ${d.stage === s.id ? 'on' : ''}`} aria-pressed={d.stage === s.id} onClick={() => app.engine.edit(id, { stage: s.id }) && app.setActive(id)}>
+          <button key={s.id} className={`btn small ${d.stage === s.id ? 'on' : ''}`} aria-pressed={d.stage === s.id} onClick={() => app.moveOne(id, s.id)}>
             <kbd>{s.key}</kbd> {s.label}
           </button>
         ))}
@@ -76,7 +80,7 @@ export function DetailPanel() {
       <h3>Value</h3>
       <label className="field">
         <span className="sr-only">Value in rupees</span>
-        <input value={value} inputMode="numeric" onChange={(e) => setValue(e.target.value)} onBlur={commitValue} onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget.blur())} />
+        <input value={value} inputMode="numeric" onFocus={() => (editing.current = true)} onChange={(e) => setValue(e.target.value)} onBlur={() => { editing.current = false; commitValue() }} onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget.blur())} />
         <span className="muted"> {inr(d.valueInr)} · {d.licences} licences</span>
       </label>
 

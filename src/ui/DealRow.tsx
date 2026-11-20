@@ -8,6 +8,8 @@ import type { RowView } from '../state/store'
 import { inr, rel } from './format'
 
 export const ROW_H = 40
+/** Dev/test hook: counts DealRow renders so we can show one change re-renders one row. */
+export const rowRenders = { n: 0, ids: new Set<string>() }
 export const rowDomId = (id: string) => `row-${id}`
 
 function Status({ row }: { row: RowView }) {
@@ -62,6 +64,8 @@ export const DealRow = memo(function DealRow({ id, index }: { id: string; index:
   const selected = useApp((a) => isSelected(a.selection, id))
   const showReasons = useApp((a) => a.filter.view === 'today')
   const now = useApp((a) => a.view.now)
+  rowRenders.n++
+  rowRenders.ids.add(id)
   const deal = row?.deal
   const reasons = useMemo(() => (showReasons && deal ? priority(deal, now).reasons : []), [showReasons, deal, now])
   if (!row || !deal) return null

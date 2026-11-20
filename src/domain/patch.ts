@@ -9,19 +9,22 @@ export function applyPatch(deal: Deal, patch: DealPatch, at: number): Deal {
 }
 
 export function patchFields(patch: DealPatch): PatchField[] {
-  return PATCH_FIELDS.filter((f) => patch[f] !== undefined)
+  const out: PatchField[] = []
+  for (const f of PATCH_FIELDS) if (patch[f] !== undefined) out.push(f)
+  return out
 }
 
 /** The current values of exactly the fields `patch` touches (the inverse patch). */
 export function pickFields(deal: Deal, patch: DealPatch): DealPatch {
   const out: Record<string, unknown> = {}
-  for (const f of patchFields(patch)) out[f] = deal[f]
+  for (const f of PATCH_FIELDS) if (patch[f] !== undefined) out[f] = deal[f]
   return out as DealPatch
 }
 
 /** True when applying `patch` to `deal` changes nothing. */
 export function isNoop(deal: Deal, patch: DealPatch): boolean {
-  return patchFields(patch).every((f) => deal[f] === patch[f])
+  for (const f of PATCH_FIELDS) if (patch[f] !== undefined && deal[f] !== patch[f]) return false
+  return true
 }
 
 export function samePatch(a: DealPatch, b: DealPatch): boolean {

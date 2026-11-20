@@ -314,6 +314,8 @@ export class PipelineApp {
     let rows: Map<string, { by: number; fields: string[] }> | null = null
     let entering: Set<string> | null = null
     for (const r of ev.remote) {
+      // My own writes echo back through the feed; the overlay path already handled their view effects.
+      if (r.by === ME) continue
       remoteIds.add(r.id)
       const inView = snapshotHas(this.view, r.id)
       const touchesView = this.filter.view !== 'failed' && r.fields.some((f) => this.vf.has(f))
@@ -335,7 +337,6 @@ export class PipelineApp {
       const ee = entering ?? this.deferred.entering
       this.deferred = { rows: rr, entering: ee, count: rr.size + ee.size }
     }
-    for (const r of ev.remote) this.rowCache.delete(r.id)
   }
 
   private removeFromView(gone: ReadonlySet<string>): void {
@@ -393,13 +394,9 @@ export class PipelineApp {
     this.online = online
     if (online) {
       // Anything that failed only because we were offline is safe to resend.
-      const offlineFailed = [...this.engine.problems].filter((id) => {
-        const s = this.engine.syncOf(id)
-        return s?.status === 'failed' && /offline/i.test(s.error ?? '')
-      })
-      if (offlineFailed.length) {
-        offlineFailed.forEach((id) => this.engine.retry(id))
-        this.toast({ kind: 'info', message: `Back online. Retrying ${offlineFailed.length} unsaved ${offlineFailed.length === 1 ? 'change' : 'changes'}.` })
+      const n = this.engine.retryAll((_id, s) => /offline/i.test(s.error ?? ''))
+      if (n) {
+        this.toast({ kind: 'info', message: `Back online. Retrying ${n} unsaved ${n === 1 ? 'change' : 'changes'}.` })
       } else this.toast({ kind: 'info', message: 'Back online.' })
       this.livePolite = 'Back online'
     } else {
@@ -566,7 +563,8 @@ export class PipelineApp {
     if (ok && c) c.run()
   }
 
-  private moveOne(id: string, stage: StageId): void {
+  /** Move one specific deal (not the selection). Records undo and shows the Undo toast. */
+  moveOne(id: string, stage: StageId): void {
     const d = this.engine.effective(id)
     if (!d) return
     const res = this.engine.edit(id, { stage })

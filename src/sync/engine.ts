@@ -91,7 +91,9 @@ export class SyncEngine {
   private delays: number[]
   private listeners = new Set<Listener>()
   private keyN = 0
-  private summaryCache: Summary = { queued: 0, saving: 0, failed: 0, conflict: 0, pending: 0 }
+  /** Mutable counters; `summary()` hands out an immutable snapshot (rebuilt only when something changed). */
+  private sum: Summary = { queued: 0, saving: 0, failed: 0, conflict: 0, pending: 0 }
+  private sumSnap: Summary | null = null
   private depth = 0
   private prevSnap = new Map<string, Deal | undefined>()
   private ev: EngineEvent = emptyEvent()
@@ -110,7 +112,12 @@ export class SyncEngine {
     return () => this.listeners.delete(l)
   }
   summary(): Summary {
-    return this.summaryCache
+    return (this.sumSnap ??= { ...this.sum })
+  }
+  private bump(status: EntryStatus, d: 1 | -1): void {
+    this.sum[status] += d
+    this.sum.pending += d
+    this.sumSnap = null
   }
   /** What the user sees: confirmed row + unconfirmed intents. */
   effective(id: string): Deal | undefined {
@@ -185,22 +192,22 @@ export class SyncEngine {
   }
 
   private setStatus(e: OverlayEntry, s: EntryStatus): void {
-    if (this.overlay.get(e.id) === e) this.summaryCache = adjust(this.summaryCache, e.status, -1)
+    if (this.overlay.get(e.id) === e) this.bump(e.status, -1)
     e.status = s
-    if (this.overlay.get(e.id) === e) this.summaryCache = adjust(this.summaryCache, s, 1)
+    if (this.overlay.get(e.id) === e) this.bump(s, 1)
     if (s === 'failed' || s === 'conflict') this.problems.add(e.id)
     else this.problems.delete(e.id)
   }
   private register(e: OverlayEntry): void {
     this.overlay.set(e.id, e)
-    this.summaryCache = adjust(this.summaryCache, e.status, 1)
+    this.bump(e.status, 1)
     if (e.status === 'failed' || e.status === 'conflict') this.problems.add(e.id)
   }
   private unregister(e: OverlayEntry): void {
     if (this.overlay.get(e.id) !== e) return
     if (e.timer) clearTimeout(e.timer)
     e.token++ // abandon any in-flight response
-    this.summaryCache = adjust(this.summaryCache, e.status, -1)
+    this.bump(e.status, -1)
     this.overlay.delete(e.id)
     this.problems.delete(e.id)
   }
@@ -394,8 +401,11 @@ export class SyncEngine {
       this.pump(id)
     })
   }
-  retryAll(): number {
-    const ids = [...this.problems].filter((id) => this.overlay.get(id)?.status === 'failed')
+  retryAll(only?: (id: string, e: RowSync) => boolean): number {
+    const ids = [...this.problems].filter((id) => {
+      const s = this.syncOf(id)
+      return s?.status === 'failed' && (!only || only(id, s))
+    })
     const byJob = new Map<string, string[]>()
     this.tx(() => {
       for (const id of ids) {
@@ -478,19 +488,17 @@ export class SyncEngine {
       for (const id of ids) {
         const server = this.server.get(id)
         if (!server) continue
-        this.touch(id)
-        const eff = this.effective(id)!
-        inverse.set(id, pickFields(eff, patch))
         let e = this.overlay.get(id)
+        const eff = e ? foldEntry(server, e) : server
+        if (!this.prevSnap.has(id)) this.prevSnap.set(id, eff)
+        const inv = pickFields(eff, patch)
+        inverse.set(id, inv)
         if (!e) {
           e = { id, inflight: null, writes: [], status: 'queued', attempts: 0, retrying: false, token: 0 }
           this.register(e)
         }
         const prev = e.writes[e.writes.length - 1] ?? e.inflight
-        e.writes.push({
-          key: this.newKey(), patch: { ...patch }, base: pickFields(eff, patch), baseVersion: prev?.baseVersion ?? server.version,
-          at, source: 'bulk', jobId,
-        })
+        e.writes.push({ key: '', patch, base: inv, baseVersion: prev?.baseVersion ?? server.version, at, source: 'bulk', jobId })
       }
       return inverse
     })
@@ -585,8 +593,4 @@ function sameDeal(a: Deal | undefined, b: Deal): boolean {
   if (!a) return false
   return a.version === b.version && a.stage === b.stage && a.ownerId === b.ownerId && a.valueInr === b.valueInr &&
     a.nextFollowUpAt === b.nextFollowUpAt && a.expectedCloseAt === b.expectedCloseAt && a.stageEnteredAt === b.stageEnteredAt
-}
-
-function adjust(s: Summary, status: EntryStatus, d: 1 | -1): Summary {
-  return { ...s, [status]: s[status] + d, pending: s.pending + d }
 }

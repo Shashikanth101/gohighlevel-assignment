@@ -158,14 +158,14 @@ export function CommandPalette() {
     const ok = ACTIONS.filter((a) => !a.enabled || a.enabled(app))
     if (!q.trim()) return ok
     return ok
-      .map((a) => [a, matchScore(a.label + ' ' + a.group, q)] as const)
+      .map((a) => [a, matchScore(`${a.label} ${a.group} ${a.keywords ?? ''}`, q)] as const)
       .filter(([, s]) => s >= 0)
       .sort((x, y) => x[1] - y[1])
       .map(([a]) => a)
   }, [q, app])
   const sel = Math.min(i, Math.max(0, results.length - 1))
   useEffect(() => {
-    list.current?.children[sel]?.scrollIntoView({ block: 'nearest' })
+    list.current?.children[sel]?.scrollIntoView?.({ block: 'nearest' })
   }, [sel])
   const run = (a: Action | undefined) => {
     if (!a) return

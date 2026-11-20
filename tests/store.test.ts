@@ -172,3 +172,28 @@ describe('row-level subscriptions', () => {
     })
   })
 })
+
+describe('echoes and reconnects', () => {
+  it('my own write coming back through the feed is not a "teammate update"', async () => {
+    const d = dealAt(0)
+    app.setActive(d.id)
+    app.moveTo('contacted') // leaves the filter; saves
+    await settle(0)
+    await app.pollNow() // the feed now returns my own change (updatedBy = me)
+    await settle(0)
+    expect(app.deferred.count).toBe(0)
+    expect(app.getRow(d.id)!.deferredBy).toBeUndefined()
+  })
+
+  it('retryAll(filter) only resends the failures that match, grouped through the bulk job', async () => {
+    server.failNext(3, 'rejected')
+    app.setActive(dealAt(0).id)
+    app.moveTo('won')
+    await settle(2500)
+    expect(app.summary.failed).toBe(1)
+    expect(app.engine.retryAll(() => false)).toBe(0)
+    expect(app.engine.retryAll()).toBe(1)
+    await settle(0)
+    expect(app.summary.pending).toBe(0)
+  })
+})

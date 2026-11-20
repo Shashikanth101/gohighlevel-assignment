@@ -115,16 +115,23 @@ export class BulkRunner {
   /** Start a job. `groups` is usually one {patch, ids}; Undo uses one group per distinct inverse patch. */
   start(label: string, groups: { patch: DealPatch; ids: string[] }[], kind: Job['kind'] = 'move'): Job {
     const id = `job${++this.n}`
-    const ids = groups.flatMap((g) => g.ids)
+    const ids: string[] = []
+    const state = new Map<string, IdState>()
+    for (const g of groups) for (const x of g.ids) { ids.push(x); state.set(x, 'pending') }
+    let groupOf: Map<string, number> | null = null
+    if (groups.length > 1) {
+      groupOf = new Map()
+      groups.forEach((g, i) => g.ids.forEach((x) => groupOf!.set(x, i)))
+    }
     const js: JobState = {
       job: {
         id, label, kind, patch: groups[0]?.patch ?? {}, total: ids.length, done: 0, failed: 0, dropped: 0, waiting: 0,
         status: 'running', undone: false, startedAt: this.now(),
       },
       groups: groups.map((g) => ({ patch: g.patch, queue: g.ids, pos: 0, retry: [] })),
-      groupOf: groups.length > 1 ? new Map(groups.flatMap((g, i) => g.ids.map((x) => [x, i] as const))) : null,
+      groupOf,
       ids,
-      state: new Map(ids.map((x) => [x, 'pending'] as const)),
+      state,
       parked: new Set(),
       inverse: new Map(),
       running: 0,

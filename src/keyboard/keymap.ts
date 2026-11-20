@@ -13,6 +13,8 @@ export interface Action {
   group: ActionGroup
   /** Shown in help and the palette. */
   keys?: string
+  /** Extra words the command palette matches on. */
+  keywords?: string
   run: (app: PipelineApp) => void
   enabled?: (app: PipelineApp) => boolean
 }
@@ -67,8 +69,8 @@ export const ACTIONS: Action[] = [
 
   { id: 'details', label: 'Open details for focused deal', group: 'App', keys: 'Enter', run: (a) => a.setUi({ detailOpen: true }), enabled: (a) => a.activeId !== null },
   { id: 'palette', label: 'Command palette', group: 'App', keys: 'Ctrl/⌘ K', run: (a) => a.setUi({ paletteOpen: true }) },
-  { id: 'help', label: 'Keyboard shortcuts', group: 'App', keys: '?', run: (a) => a.setUi({ helpOpen: true }) },
-  { id: 'dev', label: 'Toggle Dev Panel', group: 'App', keys: 'Shift D', run: (a) => a.setUi({ devOpen: !a.ui.devOpen }) },
+  { id: 'help', label: 'Keyboard shortcuts', group: 'App', keys: '?', keywords: 'help keys cheatsheet', run: (a) => a.setUi({ helpOpen: true }) },
+  { id: 'dev', label: 'Toggle Dev Panel', group: 'App', keys: 'Shift D', keywords: 'settings scenarios fake api debug', run: (a) => a.setUi({ devOpen: !a.ui.devOpen }) },
 ]
 
 function nextSort(a: PipelineApp): SortKey {
