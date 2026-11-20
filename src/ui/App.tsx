@@ -104,9 +104,9 @@ export function App() {
         </main>
         {detailOpen && phase === 'ready' && <DetailPanel />}
         {devOpen && <DevPanel />}
+        <Toasts />
       </div>
       <JobsPanel />
-      <Toasts />
       {paletteOpen && <CommandPalette />}
       {helpOpen && <ShortcutsHelp />}
       {pickerOpen && <StagePicker />}

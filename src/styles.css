@@ -58,7 +58,7 @@ kbd { font: 11px ui-monospace, monospace; background: var(--bg); border: 1px sol
 .tray-msg { font-size: 12px; color: var(--muted); }
 .tray-actions { display: flex; flex-direction: column; gap: 4px; }
 
-.main { flex: 1; display: flex; min-height: 0; }
+.main { flex: 1; display: flex; min-height: 0; position: relative; }
 .rail { width: 218px; padding: 10px; background: var(--panel); border-right: 1px solid var(--line); overflow: auto; flex: none; }
 .rail-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 2px 4px 8px; }
 .stage { display: grid; grid-template-columns: 1fr auto; width: 100%; text-align: left; border: 1px solid transparent; background: none; border-radius: 6px; padding: 6px 8px; margin-bottom: 2px; }
@@ -137,7 +137,7 @@ kbd { font: 11px ui-monospace, monospace; background: var(--bg); border: 1px sol
 .job-stats { display: flex; align-items: center; gap: 12px; margin-top: 4px; font-size: 12px; }
 .bad-text { color: var(--bad); font-weight: 600; }
 
-.toasts { position: fixed; left: 50%; transform: translateX(-50%); top: 56px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 560px; width: max-content; }
+.toasts { position: absolute; left: 234px; bottom: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 560px; width: max-content; }
 .toast { display: flex; align-items: center; gap: 10px; background: #1f2937; color: #fff; padding: 9px 12px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.3); animation: pop .2s; }
 .toast.error { background: var(--bad); }
 .toast .mini { color: #1f2937; background: #fff; }

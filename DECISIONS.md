@@ -90,7 +90,8 @@ Format: **decision** — why — *rejected alternative*. Calls I made without as
     to rows the user can no longer see.
 30. **Failures are never toast-only.** Persistent tray state (red), a persistent toast with an action, a Failed
     badge on the tab, and an `aria-live="assertive"` message. Everything else is `polite`.
-31. **Toasts at top-center**, not bottom-left: the Jobs panel docks at the bottom and they collided.
+31. **Toasts sit bottom-left inside the main area** (above the grid, never over the toolbar or the Jobs dock):
+    top-center covered the updates pill and a fixed bottom-left collided with the Jobs panel.
 32. **Search is debounced (120 ms)** and `Enter` applies it immediately. Selection is cleared on search (see 29).
 33. **Esc inside an input blurs it and returns to the grid**, so the keyboard never gets stranded.
 

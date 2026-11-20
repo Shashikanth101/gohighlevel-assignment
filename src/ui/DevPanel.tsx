@@ -66,7 +66,7 @@ export function DevPanel() {
         <button className="btn" onClick={() => { server?.failNext(3, 'rejected'); note('The next 3 requests fail (exhausts auto-retry).') }}>Fail next 3 requests</button>
         <button className="btn" onClick={() => { server?.interfereNext('same'); note('Armed. The next deal you save collides with a teammate edit to the same field.') }}>Teammate edits my pending deal</button>
         <button className="btn" onClick={() => { server?.interfereNext('other'); note('Armed. The next deal you save gets a teammate edit to a different field (silent rebase).') }}>…different field (silent rebase)</button>
-        <button className="btn" onClick={() => { server?.burst(10); void app.pollNow(); note('10 teammate changes sent.') }}>Burst of 10 teammate changes</button>
+        <button className="btn" onClick={() => { server?.burst(10, app.view.ids.slice(0, 300)); void app.pollNow(); note('10 teammate changes sent (half on rows in your list).') }}>Burst of 10 teammate changes</button>
         <button className="btn" onClick={() => { server?.goOffline(10_000); note('Offline for 10 seconds.') }}>Go offline 10s</button>
       </div>
 

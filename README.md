@@ -44,7 +44,7 @@ There is no backend. A fake server lives inside the app (`src/api/fakeServer.ts`
 | **Fail next 3 requests** | Exhausts the two auto-retries. | Row shows **Not saved** with Retry / Revert, the tray goes red, an assertive live message fires. The change is kept on screen. |
 | **Teammate edits my pending deal** | Armed: the next deal you save collides with a teammate edit **to the same field**. | A conflict: "Arjun moved this to Lost" with **Keep mine / Take theirs**, in the row, the tray and the detail panel. |
 | **…different field (silent rebase)** | Armed: the teammate edit is to a different field. | Nothing visible, except "Silent rebases" ticking up in stats. Your save lands on top of theirs. |
-| **Burst of 10 teammate changes** | Ten random teammate changes arrive. | Rail counts move live; rows that are in your list and would move wait behind the pill. |
+| **Burst of 10 teammate changes** | Ten teammate changes arrive; half of them target rows in your current list (so the pill reliably appears). | Rail counts move live; rows that are in your list and would move wait behind the pill. |
 | **Go offline 10s** | All requests fail fast for 10 s. | Offline chip, persistent toast; unsaved changes retry automatically on reconnect. |
 
 Failure rate, latency (300–1500 ms default), the lost-response share, the per-deal bulk failure rate

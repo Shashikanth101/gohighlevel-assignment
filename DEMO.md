@@ -22,8 +22,9 @@ Setup: `npm run dev`, open the app, press `Shift+D` to open the Dev Panel. Defau
   exactly one. No double apply.
 
 ## 4. Teammate change (1:45–2:15)
-* Dev Panel → **Burst of 10 teammate changes**, or lower the poll interval. Rail counts tick live. If a change
-  touches a row in view, the **"N updates from teammates · Show"** pill appears and nothing moves.
+* Dev Panel → **Burst of 10 teammate changes** (half target rows in your list). Rail counts tick live; value
+  edits flash in place; stage moves that would reorder or remove rows raise the **"N updates from teammates · Show"**
+  pill, and nothing moves.
 * Press `U` (or click Show): the list updates, the focused row stays put.
 * For a conflict: **Teammate edits my pending deal**, then move any deal. The tray shows "Dev moved this to Lost"
   with **Keep mine / Take theirs**.

@@ -243,8 +243,12 @@ export class FakeServer implements Api {
   interfereNext(mode: InterfereMode): void {
     this.interfere = mode
   }
-  burst(n = 10): void {
-    for (let i = 0; i < n; i++) this.teammateChange()
+  /** `n` teammate changes. If `visible` is given, every other change targets one of those ids (rows the user is looking at). */
+  burst(n = 10, visible?: readonly string[]): void {
+    for (let i = 0; i < n; i++) {
+      const target = visible?.length && i % 2 === 0 ? visible[Math.floor(this.rng() * visible.length)] : undefined
+      this.teammateChange(target)
+    }
   }
   goOffline(ms = 10_000): void {
     this.settings.set({ offline: true })
