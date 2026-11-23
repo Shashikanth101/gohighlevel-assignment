@@ -1,4 +1,9 @@
+import type { NewDealInput } from '../domain/newDeal'
 import type { Deal, DealPatch } from '../domain/types'
+
+/** Backoff before each automatic retry of a failed write. So a write is sent at most 1 + length times before it is "Not saved". */
+export const AUTO_RETRY_DELAYS_MS = [400, 1200]
+export const AUTO_ATTEMPTS = 1 + AUTO_RETRY_DELAYS_MS.length
 
 export type NetworkErrorKind = 'offline' | 'rejected' | 'lost'
 
@@ -33,6 +38,12 @@ export interface BulkItemResult {
   error?: string
 }
 
+export interface CreateRequest {
+  input: NewDealInput
+  /** Re-sent unchanged on retry, so "created but response lost" cannot create the deal twice. */
+  idempotencyKey: string
+}
+
 export interface RemoteChange {
   seq: number
   deal: Deal
@@ -50,4 +61,6 @@ export interface Api {
   changesSince(seq: number): Promise<ChangesResult>
   updateDeal(req: UpdateRequest): Promise<UpdateResult>
   bulkUpdate(req: BulkRequest): Promise<BulkItemResult[]>
+  /** The server assigns the real id. */
+  createDeal(req: CreateRequest): Promise<Deal>
 }
