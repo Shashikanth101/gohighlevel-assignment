@@ -4,7 +4,7 @@ A one-screen sales pipeline for a 20-person team working ~50,000 shared deals, b
 saves fail, the network is slow, and teammates change things under you.
 
 * **Video walkthrough:** _link to be added_
-* **Live demo:** _link to be added_
+* **Live demo:** https://<your-username>.github.io/<repo-name>/
 * **Demo script (3 min):** [DEMO.md](DEMO.md)
 
 ```bash
@@ -248,6 +248,21 @@ deferral, pinned focus, scoped counts, closing and reopening, undo, the Failed v
 Today membership and the seed's shape; performance budgets; and jsdom UI tests for grid semantics, the keyboard,
 typing safety, keys after every kind of mouse click, the stage picker, creating a deal, the Dev Panel's armed indicator, the failed-save flow, live regions and render counts. There is no committed browser (e2e)
 suite.
+
+## Deploy
+
+GitHub Pages, via `.github/workflows/deploy.yml`. On every push to `main` (or a manual run) it runs `npm ci`,
+typecheck and tests, builds with `VITE_BASE=/<repo-name>/`, and publishes `dist`. One-time setup: repository
+**Settings → Pages → Source: GitHub Actions**. The Node version comes from `.nvmrc`. Local dev is unaffected (the base
+is `/` unless `VITE_BASE` is set). To check the subpath build locally:
+
+```bash
+export VITE_BASE=/<repo-name>/
+npm run build && npm run preview     # then open http://localhost:4173/<repo-name>/
+```
+
+I verified the subpath build this way (assets, scrolling, `?seed=` and `?size=`). The workflow itself has not been run
+on GitHub yet.
 
 ## Folder map
 
