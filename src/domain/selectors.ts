@@ -1,7 +1,6 @@
 import type { Deal, SortSpec, StageId, ViewFilter, ViewId } from './types'
 import { ME } from './types'
-import { isTerminal } from './stages'
-import { priority } from './priority'
+import { inToday, todaySortKey } from './priority'
 
 export interface MatchCtx {
   now: number
@@ -17,7 +16,7 @@ export const EMPTY_FILTER: ViewFilter = { view: 'today', stage: null, query: '' 
 export function matches(deal: Deal, f: ViewFilter, ctx: MatchCtx): boolean {
   switch (f.view) {
     case 'today':
-      if (deal.ownerId !== ME || isTerminal(deal.stage) || priority(deal, ctx.now).reasons.length === 0) return false
+      if (deal.ownerId !== ME || !inToday(deal, ctx.now)) return false
       break
     case 'mine':
       if (deal.ownerId !== ME) return false
@@ -60,7 +59,7 @@ export function viewFields(f: ViewFilter, sort: SortSpec): Set<string> {
 
 function sortKey(d: Deal, sort: SortSpec, now: number): number | string {
   switch (sort.key) {
-    case 'priority': return priority(d, now).score
+    case 'priority': return todaySortKey(d, now)
     case 'value': return d.valueInr
     case 'close': return d.expectedCloseAt
     case 'activity': return d.lastActivityAt

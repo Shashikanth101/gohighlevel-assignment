@@ -18,7 +18,8 @@ export interface Deal {
 }
 
 /** Fields a user (or teammate) can edit. */
-export const PATCH_FIELDS = ['stage', 'ownerId', 'valueInr', 'nextFollowUpAt', 'expectedCloseAt'] as const
+/** `stageEnteredAt` is normally derived from a stage change; it is patchable so undo can restore the original close/entry date. */
+export const PATCH_FIELDS = ['stage', 'ownerId', 'valueInr', 'nextFollowUpAt', 'expectedCloseAt', 'stageEnteredAt'] as const
 export type PatchField = (typeof PATCH_FIELDS)[number]
 export type DealPatch = Partial<Pick<Deal, PatchField>>
 

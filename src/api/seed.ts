@@ -24,9 +24,16 @@ export function generateDeals(size: number, seed: number, now: number): Deal[] {
     const dwellDays = Math.floor(-Math.log(1 - r()) * 7)
     // ln-normal-ish value, median ~3L, tail into the crores.
     const value = Math.round(Math.exp(12.6 + (r() + r() + r() - 1.5) * 2.2) / 1000) * 1000
-    const followUp =
-      terminal || r() < 0.18 ? null : now + randInt(r, -12, 14) * DAY + randInt(r, 0, 20) * 3_600_000
-    const stageEntered = now - dwellDays * DAY - randInt(r, 0, 23) * 3_600_000
+    // Stage-aware "next step": New Lead = contact-by date (short window), open stages = follow-up, closed = none.
+    const followUp = terminal
+      ? null
+      : stage === 'new'
+        ? now + randInt(r, -3, 5) * DAY + randInt(r, 0, 20) * 3_600_000
+        : now + randInt(r, -12, 14) * DAY + randInt(r, 0, 20) * 3_600_000
+    // Won/Lost: ~12% closed within the last week (they show in Today), the rest 8+ days ago.
+    const closedDays = terminal ? (r() < 0.12 ? randInt(r, 0, 6) : 8 + Math.floor(-Math.log(1 - r()) * 20)) : dwellDays
+    const stageEntered = now - closedDays * DAY - randInt(r, 0, 23) * 3_600_000
+    const closeOffset = randInt(r, terminal ? -30 : -4, terminal ? 0 : 60)
     out[i] = {
       id: `D-${String(i + 1).padStart(5, '0')}`,
       name: `${pick(r, ADJ)} ${pick(r, NOUN)} ${pick(r, SUFFIX)}`,
@@ -38,7 +45,8 @@ export function generateDeals(size: number, seed: number, now: number): Deal[] {
       lastActivityAt: now - lastActivityDays * DAY - randInt(r, 0, 23) * 3_600_000,
       stageEnteredAt: stageEntered,
       nextFollowUpAt: followUp,
-      expectedCloseAt: now + randInt(r, terminal ? -30 : -4, terminal ? 0 : 60) * DAY,
+      // Closed deals: the close date IS when they closed. Open deals: when they are expected to.
+      expectedCloseAt: terminal ? stageEntered : now + closeOffset * DAY,
       updatedAt: stageEntered,
       updatedBy: randInt(r, 0, 19),
     }

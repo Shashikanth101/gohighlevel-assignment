@@ -62,7 +62,7 @@ describe('50k deals', async () => {
     }
     expect(app.counts.all.new.count).toBe(recount.new)
     expect(app.counts.all.lost.count).toBe(recount.lost)
-    expect(app.view.ids.length).toBe(0) // all left the filter in the same update
+    expect(app.view.ids.length).toBe(n - ids.length) // every moved deal left the filter in the same update
   })
 
   it('default sorts are what the README says', () => {
