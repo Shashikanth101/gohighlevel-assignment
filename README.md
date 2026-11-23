@@ -3,9 +3,8 @@
 A one-screen sales pipeline for a 20-person team working ~50,000 shared deals, built around what happens when
 saves fail, the network is slow, and teammates change things under you.
 
-* **Video walkthrough:** _link to be added_
-* **Live demo:** https://<your-username>.github.io/<repo-name>/
-* **Demo script (3 min):** [DEMO.md](DEMO.md)
+* **Video walkthrough:** [https://youtu.be/SgyuJjSM8as](https://youtu.be/SgyuJjSM8as)
+* **Live demo:** [https://shashikanth101.github.io/gohighlevel-assignment/](https://shashikanth101.github.io/gohighlevel-assignment/)
 
 ```bash
 npm install && npm run dev      # http://localhost:5173
@@ -275,5 +274,4 @@ src/
   keyboard/ the key handler and the key list shown in the sidebar
   ui/       React components
 tests/      Vitest + Testing Library
-DEMO.md     3-minute walkthrough script
 ```
