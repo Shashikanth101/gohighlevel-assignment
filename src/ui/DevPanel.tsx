@@ -1,6 +1,11 @@
 import { useSyncExternalStore } from 'react'
 import { useApp, useAppInstance } from '../state/hooks'
 import { getPerf, subscribePerf } from '../perf'
+import type { DevState } from '../api/fakeServer'
+
+const NO_DEV: DevState = { armed: [], log: [] }
+const noSubscribe = () => () => {}
+const noDev = () => NO_DEV
 
 function Num({ label, value, onChange, step = 1, min = 0, max }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number; max?: number }) {
   return (
@@ -15,6 +20,7 @@ export function DevPanel() {
   const app = useAppInstance()
   const s = useApp((a) => a.settingsValue)
   const perf = useSyncExternalStore(subscribePerf, getPerf)
+  const dev = useSyncExternalStore(app.server ? app.server.subscribeDev : noSubscribe, app.server ? app.server.getDev : noDev)
   useApp((a) => a.summary) // refresh stats as saves happen
   const set = app.settings.set.bind(app.settings)
   const server = app.server
@@ -38,6 +44,35 @@ export function DevPanel() {
       </div>
       <p className="muted">Fake API controls. All randomness is seeded, so a scenario replays the same way.</p>
 
+      <h3>Scenarios</h3>
+      <div className="dev-buttons">
+        <button className="btn" onClick={() => { server?.armFailAll(); note('Armed: move a deal. Every attempt of that save fails, so it ends Not saved.') }}>Fail next save (all retries)</button>
+        <button className="btn" onClick={() => { server?.armFailOnce(); note('Armed: move a deal. One attempt fails; the automatic retry recovers.') }}>Fail next attempt (retry recovers)</button>
+        <button className="btn" onClick={() => { server?.armResponseLost(); note('Armed: move a deal. The server applies it, the response is lost, the retry must not double-apply.') }}>Response lost on next save</button>
+        <button className="btn" onClick={() => { server?.interfereNext('same'); note('Armed: the next deal you save collides with a teammate edit to the same field.') }}>Teammate edits my pending deal</button>
+        <button className="btn" onClick={() => { server?.interfereNext('other'); note('Armed. The next deal you save gets a teammate edit to a different field (silent rebase).') }}>…different field (silent rebase)</button>
+        <button className="btn" onClick={() => { server?.burst(10, app.view.ids.slice(0, 300)); void app.pollNow(); note('10 teammate changes sent (half on rows in your list).') }}>Burst of 10 teammate changes</button>
+        <button className="btn" onClick={() => { server?.goOffline(10_000); note('Offline for 10 seconds.') }}>Go offline 10s</button>
+      </div>
+
+      <div className={`dev-armed ${dev.armed.length ? 'on' : ''}`} role="status" aria-label="Armed scenarios">
+        {dev.armed.length ? dev.armed.map((a) => <div key={a}>{a}</div>) : <span className="muted">Nothing armed.</span>}
+        {dev.armed.length > 0 && <button className="mini" onClick={() => server?.disarm()}>Disarm</button>}
+      </div>
+
+      <h3>Write requests (last 10)</h3>
+      <ol className="dev-log" aria-label="Write request log">
+        {dev.log.map((r) => (
+          <li key={r.n} className={`out-${r.outcome.replace(' ', '-')}`}>
+            <span className="log-what" title={r.label}>{r.label}</span>
+            <span className="log-try">try {r.attempt}</span>
+            <strong className="log-out">{r.outcome === 'replayed' ? 'ok (already applied)' : r.outcome}</strong>
+            {r.cause && <span className="muted"> · {r.cause === 'scenario' ? 'scenario' : 'random'}</span>}
+          </li>
+        ))}
+        {dev.log.length === 0 && <li className="muted">No writes yet. Move a deal.</li>}
+      </ol>
+
       <h3>Network</h3>
       <Num label="Latency min (ms)" value={s.latencyMin} step={50} onChange={(v) => set({ latencyMin: v, latencyMax: Math.max(v, s.latencyMax) })} />
       <Num label="Latency max (ms)" value={s.latencyMax} step={50} onChange={(v) => set({ latencyMax: Math.max(v, s.latencyMin) })} />
@@ -58,17 +93,6 @@ export function DevPanel() {
       <h3>Teammates</h3>
       <Num label="Changes per minute" value={s.teammateRate} step={1} onChange={(v) => set({ teammateRate: v })} />
       <Num label="Poll every (ms)" value={s.pollMs} step={500} min={500} onChange={(v) => set({ pollMs: v })} />
-
-      <h3>Scenarios</h3>
-      <div className="dev-buttons">
-        <button className="btn" onClick={() => { server?.failNext(1); note('The next save request will fail.') }}>Fail next save</button>
-        <button className="btn" onClick={() => { server?.failNext(1, 'lost'); note('Next save: applied, but the response is lost.') }}>Next save: applied, response lost</button>
-        <button className="btn" onClick={() => { server?.failNext(3, 'rejected'); note('The next 3 requests fail (exhausts auto-retry).') }}>Fail next 3 requests</button>
-        <button className="btn" onClick={() => { server?.interfereNext('same'); note('Armed. The next deal you save collides with a teammate edit to the same field.') }}>Teammate edits my pending deal</button>
-        <button className="btn" onClick={() => { server?.interfereNext('other'); note('Armed. The next deal you save gets a teammate edit to a different field (silent rebase).') }}>…different field (silent rebase)</button>
-        <button className="btn" onClick={() => { server?.burst(10, app.view.ids.slice(0, 300)); void app.pollNow(); note('10 teammate changes sent (half on rows in your list).') }}>Burst of 10 teammate changes</button>
-        <button className="btn" onClick={() => { server?.goOffline(10_000); note('Offline for 10 seconds.') }}>Go offline 10s</button>
-      </div>
 
       <h3>Dataset</h3>
       <form onSubmit={reload} className="dev-form">
