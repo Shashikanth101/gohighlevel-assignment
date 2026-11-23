@@ -21,7 +21,8 @@ export function Header() {
   const input = useRef<HTMLInputElement>(null)
   const [text, setText] = useState(query)
 
-  useEffect(() => setText(query), [query])
+  // The box always shows the active search. A view switch clears it, including text still waiting on the debounce.
+  useEffect(() => setText(query), [query, view])
   useEffect(() => {
     if (searchFocus > 0) input.current?.focus()
   }, [searchFocus])

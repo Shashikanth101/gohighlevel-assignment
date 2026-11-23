@@ -265,16 +265,19 @@ describe('grid accessibility and keyboard', () => {
       const stageOf = (id: string) => app.engine.effective(id)!.stage
       if (app.ui.zone === 'rail') {
         // the cursor lives in the rail: S/W move it, Space toggles the stage filter, L/J/K still act on the focused deal
-        const r0 = app.ui.railIndex
+        const r0 = app.railIndex()
         await user.keyboard('s')
-        expect(app.ui.railIndex).toBe(r0 + 1)
+        expect(app.railIndex()).toBe(r0 + 1)
         await user.keyboard('w')
-        expect(app.ui.railIndex).toBe(r0)
+        expect(app.railIndex()).toBe(r0)
         const f0 = app.filter.stage
         await user.keyboard(' ')
-        expect(app.filter.stage).not.toBe(f0)
+        expect(app.filter.stage).toBe(null) // Space on the active stage clears it ...
+        expect(app.railIndex()).toBe(0) // ... and the cursor follows the filter to "All stages"
+        await user.keyboard('sss') // back down to the same stage
         await user.keyboard(' ')
         expect(app.filter.stage).toBe(f0)
+        expect(app.railIndex()).toBe(r0)
         const id = app.activeId!, before = stageOf(id)
         await user.keyboard('l')
         expect(stageOf(id)).not.toBe(before)
@@ -441,6 +444,122 @@ describe('grid accessibility and keyboard', () => {
     expect(server.peek(id)!.stage).toBe('contacted')
     expect(app.view.ids).toEqual([])
   }, 10_000)
+
+  describe('one stage filter drives the filter bar, the rail highlight, the rail cursor and the rows', () => {
+    type User = ReturnType<typeof userEvent.setup>
+    const rail = () => within(screen.getByRole('navigation', { name: 'Stages' }))
+    const VIEWS = ['Today', 'My deals', 'All deals', 'Failed'] as const
+
+    async function pickStage(user: User, name: RegExp) {
+      await user.click(rail().getByRole('button', { name }))
+      await act(async () => {})
+    }
+    /** Everything that can show the stage must say "All stages". */
+    function expectAllStages(view: string) {
+      expect(app.filter.stage).toBeNull()
+      // filter bar: the view and a count, no stage chip
+      const bar = screen.getByRole('group', { name: 'Active filters' })
+      expect(bar).toHaveTextContent(new RegExp(`^${view}\\s*·\\s*[\\d,]+$`))
+      expect(within(bar).queryByRole('button', { name: /Remove .* filter/ })).toBeNull()
+      // rail highlight: only "All stages" is pressed
+      const pressed = rail().getAllByRole('button').filter((b) => b.getAttribute('aria-pressed') === 'true')
+      expect(pressed.map((b) => b.textContent)).toEqual([expect.stringMatching(/^All stages/)])
+      // rail cursor: on "All stages" (the visible ring, when the rail zone is active, and the state behind it)
+      expect(app.railIndex()).toBe(0)
+      const ringed = [...document.querySelectorAll('.rail .stage.cursor')]
+      expect(ringed.every((e) => e.textContent!.startsWith('All stages'))).toBe(true)
+      // rows: not narrowed to a stage
+      const rows = app.view.ids.length
+      expect(rail().getByRole('button', { name: /^All stages/ })).toHaveTextContent(String(rows).replace(/\B(?=(\d{3})+(?!\d))/g, ','))
+      if (rows > 20) expect(new Set(app.view.ids.map((i) => app.engine.effective(i)!.stage)).size).toBeGreaterThan(1)
+    }
+
+    beforeEach(async () => {
+      app.setFilter({ view: 'all', stage: null })
+      await act(async () => {})
+    })
+
+    it.each(VIEWS)('selecting a stage, then switching to %s, resets everything to "All stages"', async (target) => {
+      const user = userEvent.setup()
+      const from = VIEWS.find((v) => v !== target && v !== 'Failed')!
+      await user.click(screen.getByRole('tab', { name: new RegExp(`^${from}`) }))
+      await pickStage(user, /^Contacted/)
+      expect(app.filter.stage).toBe('contacted')
+      expect(app.railIndex()).toBe(2) // cursor sits on the chosen stage, as the filter says
+      expect(app.ui.zone).toBe('rail')
+      await user.click(screen.getByRole('tab', { name: new RegExp(`^${target}`) }))
+      await act(async () => {})
+      expectAllStages(target)
+    })
+
+    it('every view in turn: pick a stage, switch to the next view, all five places agree', async () => {
+      const user = userEvent.setup()
+      for (const view of [...VIEWS, 'Today'] as const) {
+        await pickStage(user, /^Won/)
+        await user.click(screen.getByRole('tab', { name: new RegExp(`^${view}`) }))
+        await act(async () => {})
+        expectAllStages(view)
+      }
+    })
+
+    it('clicking the current view tab also resets the stage everywhere', async () => {
+      const user = userEvent.setup()
+      await pickStage(user, /^Demo Done/)
+      await user.click(screen.getByRole('tab', { name: /^All deals/ }))
+      await act(async () => {})
+      expectAllStages('All deals')
+    })
+
+    it('the × on the stage chip resets the filter bar, highlight, cursor and rows the same way', async () => {
+      const user = userEvent.setup()
+      await pickStage(user, /^Demo Done/)
+      const bar = screen.getByRole('group', { name: 'Active filters' })
+      expect(bar).toHaveTextContent('Demo Done')
+      await user.click(within(bar).getByRole('button', { name: 'Remove demo filter' }))
+      await act(async () => {})
+      expectAllStages('All deals')
+    })
+
+    it('after a switch or ×, W/S start from "All stages", not from the stage that was selected', async () => {
+      const user = userEvent.setup()
+      await pickStage(user, /^Won/) // rail zone, cursor on Won (index 6)
+      await user.click(screen.getByRole('tab', { name: /^My deals/ }))
+      await act(async () => {})
+      await user.keyboard('s')
+      expect(app.railIndex()).toBe(1) // New Lead, one below All stages
+      await user.keyboard('w')
+      expect(app.railIndex()).toBe(0)
+      await pickStage(user, /^Won/)
+      await user.click(within(screen.getByRole('group', { name: 'Active filters' })).getByRole('button', { name: 'Remove won filter' }))
+      await act(async () => {})
+      await user.keyboard('s')
+      expect(app.railIndex()).toBe(1)
+      await user.keyboard(' ') // Space applies the stage under the cursor
+      expect(app.filter.stage).toBe('new')
+      expect(app.railIndex()).toBe(1) // and the cursor still agrees with the filter
+    })
+
+    it('search and the filter bar agree on a view switch: it clears both, even text still waiting on the debounce', async () => {
+      const user = userEvent.setup()
+      const box = screen.getByPlaceholderText(/Search deals/)
+      await user.type(box, 'harbor')
+      await act(async () => { await new Promise((r) => setTimeout(r, 300)) })
+      expect(app.filter.query).toBe('harbor')
+      expect(screen.getByRole('group', { name: 'Active filters' })).toHaveTextContent('“harbor”')
+      await user.click(screen.getByRole('tab', { name: /^My deals/ }))
+      await act(async () => {})
+      expect(app.filter.query).toBe('')
+      expect(box).toHaveValue('')
+      expect(screen.getByRole('group', { name: 'Active filters' })).not.toHaveTextContent('“')
+      // typed but not yet applied (inside the 120 ms debounce) when the view is switched
+      await user.type(box, 'zeta')
+      await user.click(screen.getByRole('tab', { name: /^All deals/ }))
+      await act(async () => { await new Promise((r) => setTimeout(r, 300)) })
+      expect(app.filter.query).toBe('')
+      expect(box).toHaveValue('')
+      expect(screen.getByRole('group', { name: 'Active filters' })).not.toHaveTextContent('“')
+    })
+  })
 
   it('a partial move (some selected deals have nowhere to go) still clears the whole selection', async () => {
     const user = userEvent.setup()

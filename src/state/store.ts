@@ -122,8 +122,12 @@ export class PipelineApp {
     devOpen: false, trayOpen: false, pickerOpen: false, newDealOpen: false, searchFocus: 0, gridFocus: 0,
     /** Which keyboard zone owns the arrows: the stage rail or the table. */
     zone: 'table' as 'table' | 'rail',
-    /** Cursor in the rail: 0 = All stages, 1..7 = STAGES[i - 1]. */
-    railIndex: 0,
+    /**
+     * Where W/S have moved the rail cursor ahead of applying it: 0 = All stages, 1..7 = STAGES[i - 1]. Null means
+     * "on the active stage filter": the cursor is DERIVED from the filter (see `railIndex()`), and any filter change,
+     * view switch or × resets it to null, so it can never disagree with the highlighted stage.
+     */
+    railCursor: null as number | null,
   }
   settingsValue: Settings
   undoDepth = 0
@@ -284,6 +288,7 @@ export class PipelineApp {
     const viewChanged = patch.view !== undefined && patch.view !== this.filter.view
     this.filter = { ...this.filter, ...patch }
     if (viewChanged) this.sort = defaultSort(this.filter.view)
+    this.ui = { ...this.ui, railCursor: null } // the rail cursor follows the filter again
     this.clearSelection()
     this.rebuildView({ pin: false })
     done()
@@ -511,20 +516,21 @@ export class PipelineApp {
   }
 
   // ---- keyboard zones ----
-  setZone(zone: 'table' | 'rail', railIndex?: number): void {
-    if (zone === 'rail' && railIndex === undefined) {
-      const at = this.filter.stage ? STAGES.findIndex((s) => s.id === this.filter.stage) + 1 : 0
-      railIndex = at
-    }
-    this.setUi({ zone, railIndex: railIndex ?? this.ui.railIndex })
+  setZone(zone: 'table' | 'rail'): void {
+    this.setUi({ zone, railCursor: null }) // entering the rail puts the cursor on the active stage
     this.say(zone === 'rail' ? 'Stage list' : 'Deals table')
   }
+  /** The rail cursor: the stage W/S have moved to, else the active stage filter. 0 = All stages. */
+  railIndex(): number {
+    if (this.ui.railCursor !== null) return this.ui.railCursor
+    return this.filter.stage ? STAGES.findIndex((s) => s.id === this.filter.stage) + 1 : 0
+  }
   moveRail(delta: number): void {
-    this.setUi({ railIndex: Math.max(0, Math.min(STAGES.length, this.ui.railIndex + delta)) })
+    this.setUi({ railCursor: Math.max(0, Math.min(STAGES.length, this.railIndex() + delta)) })
   }
   /** Space in the rail: apply (or clear) the stage under the cursor. */
   activateRail(): void {
-    const i = this.ui.railIndex
+    const i = this.railIndex()
     this.setStageFilter(i === 0 ? null : STAGES[i - 1]!.id)
   }
 
