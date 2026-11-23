@@ -8,18 +8,20 @@
  *  - Retries re-use the idempotency key, so "applied but response lost" cannot double-apply.
  */
 import type { Api, RemoteChange } from '../api/api'
-import { NetworkError } from '../api/api'
+import { AUTO_RETRY_DELAYS_MS, NetworkError } from '../api/api'
 import type { Deal, DealPatch } from '../domain/types'
+import { buildNewDeal, type NewDealInput } from '../domain/newDeal'
 import { changedFields, isNoop, patchFields, pickFields } from '../domain/patch'
 import type { EntryStatus, OverlayEntry, Write } from './overlay'
 import { allWrites, foldEntry, visibleBase, visiblePatch } from './overlay'
 
-export const RETRY_DELAYS_MS = [400, 1200]
+export const RETRY_DELAYS_MS = AUTO_RETRY_DELAYS_MS
 
 export interface EffectiveChange {
   id: string
   prev: Deal | undefined
-  next: Deal
+  /** Undefined when the row no longer exists (a temporary row was replaced or discarded). */
+  next: Deal | undefined
 }
 export interface RemoteApplied {
   id: string
@@ -46,6 +48,21 @@ export interface EngineEvent {
   newConflicts: string[]
   jobSignals: JobSignal[]
   rebased: string[]
+  /** Optimistic creates the server confirmed: the temporary id is now `to`. */
+  replaced: { from: string; to: string }[]
+}
+
+/** A deal the user created that the server has not confirmed yet. Its optimistic row lives in `server` under a temp id. */
+interface CreateEntry {
+  tempId: string
+  input: NewDealInput
+  key: string
+  status: EntryStatus
+  attempts: number
+  retrying: boolean
+  error?: string
+  timer?: ReturnType<typeof setTimeout>
+  token: number
 }
 
 export interface Summary {
@@ -73,12 +90,15 @@ export interface EngineDeps {
 
 type Listener = (e: EngineEvent) => void
 const emptyEvent = (): EngineEvent => ({
-  touched: [], changes: [], remote: [], acked: [], newFailures: [], newConflicts: [], jobSignals: [], rebased: [],
+  touched: [], changes: [], remote: [], acked: [], newFailures: [], newConflicts: [], jobSignals: [], rebased: [], replaced: [],
 })
 
 export class SyncEngine {
   readonly server = new Map<string, Deal>()
   readonly overlay = new Map<string, OverlayEntry>()
+  /** Creates awaiting confirmation, by temporary id. */
+  private readonly creates = new Map<string, CreateEntry>()
+  private tmpN = 0
   /** Ids whose head write is failed/conflict (drives the Failed view). */
   readonly problems = new Set<string>()
   /** Set by the bulk runner so it learns when a parked deal becomes sendable. */
@@ -138,6 +158,8 @@ export class SyncEngine {
     }
   }
   syncOf(id: string): RowSync | undefined {
+    const c = this.creates.get(id)
+    if (c) return { status: c.status, error: c.error, retrying: c.retrying, attempts: c.attempts }
     const e = this.overlay.get(id)
     return e && { status: e.status, error: e.error, retrying: e.retrying, theirs: e.theirs, attempts: e.attempts }
   }
@@ -150,7 +172,11 @@ export class SyncEngine {
     return e && visibleBase(e)
   }
   hasPending(): boolean {
-    return this.overlay.size > 0
+    return this.overlay.size > 0 || this.creates.size > 0
+  }
+  /** True while the deal exists only optimistically (it has a temporary id and cannot be edited yet). */
+  isCreating(id: string): boolean {
+    return this.creates.has(id)
   }
   loadChunk(deals: Deal[]): void {
     for (const d of deals) this.server.set(d.id, d)
@@ -180,7 +206,7 @@ export class SyncEngine {
     for (const [id, prev] of this.prevSnap) {
       ev.touched.push(id)
       const next = this.effective(id)
-      if (next && !sameDeal(prev, next)) ev.changes.push({ id, prev, next })
+      if (next ? !sameDeal(prev, next) : prev) ev.changes.push({ id, prev, next })
     }
     this.prevSnap = new Map()
     this.ev = emptyEvent()
@@ -188,7 +214,7 @@ export class SyncEngine {
   }
   private hasSignals(): boolean {
     const e = this.ev
-    return !!(e.remote.length || e.acked.length || e.newFailures.length || e.newConflicts.length || e.jobSignals.length)
+    return !!(e.remote.length || e.acked.length || e.newFailures.length || e.newConflicts.length || e.jobSignals.length || e.replaced.length)
   }
 
   private setStatus(e: OverlayEntry, s: EntryStatus): void {
@@ -220,7 +246,7 @@ export class SyncEngine {
   /** Optimistically apply an edit and queue it. Returns the inverse patch (for undo), or null for a no-op. */
   edit(id: string, patch: DealPatch): { inverse: DealPatch } | null {
     const server = this.server.get(id)
-    if (!server) return null
+    if (!server || this.creates.has(id)) return null
     const eff = this.effective(id)!
     if (isNoop(eff, patch)) return null
     return this.tx(() => {
@@ -246,6 +272,104 @@ export class SyncEngine {
       }
       this.pump(id)
       return { inverse }
+    })
+  }
+
+  // ---- creating deals ----------------------------------------------------------------
+
+  /**
+   * Optimistically add a New Lead under a temporary id and send the create. Retries and failure
+   * handling mirror edits; on success the row is swapped for the server's (real id) in one event.
+   */
+  create(input: NewDealInput): string {
+    const tempId = `tmp-${++this.tmpN}`
+    return this.tx(() => {
+      this.touch(tempId) // snapshot prev (undefined) first, so counts and views see an added row
+      this.server.set(tempId, buildNewDeal(tempId, input, this.now(), 0))
+      const c: CreateEntry = { tempId, input, key: this.newKey(), status: 'saving', attempts: 0, retrying: false, token: 0 }
+      this.creates.set(tempId, c)
+      this.bump('saving', 1)
+      void this.attemptCreate(c)
+      return tempId
+    })
+  }
+
+  private setCreateStatus(c: CreateEntry, s: EntryStatus): void {
+    this.bump(c.status, -1)
+    c.status = s
+    this.bump(s, 1)
+    if (s === 'failed') this.problems.add(c.tempId)
+    else this.problems.delete(c.tempId)
+  }
+  private dropCreate(c: CreateEntry): void {
+    if (c.timer) clearTimeout(c.timer)
+    c.token++ // abandon any in-flight response
+    this.bump(c.status, -1)
+    this.creates.delete(c.tempId)
+    this.problems.delete(c.tempId)
+  }
+
+  private async attemptCreate(c: CreateEntry): Promise<void> {
+    const token = ++c.token
+    const live = () => this.creates.get(c.tempId) === c && c.token === token
+    try {
+      const deal = await this.api.createDeal({ input: c.input, idempotencyKey: c.key })
+      if (!live()) return
+      this.tx(() => {
+        this.touch(c.tempId)
+        this.touch(deal.id)
+        this.dropCreate(c)
+        this.server.delete(c.tempId)
+        const cur = this.server.get(deal.id) // the change feed may have delivered it first
+        if (!cur || deal.version >= cur.version) this.server.set(deal.id, deal)
+        this.ev.replaced.push({ from: c.tempId, to: deal.id })
+        this.ev.acked.push(deal.id)
+      })
+    } catch (err) {
+      if (!live()) return
+      this.tx(() => {
+        this.touch(c.tempId)
+        c.attempts++
+        const msg = err instanceof Error ? err.message : 'Save failed'
+        if (c.attempts <= this.delays.length) {
+          c.retrying = true
+          c.error = msg
+          this.stats.retries++
+          c.timer = setTimeout(() => {
+            if (this.creates.get(c.tempId) !== c) return
+            this.tx(() => {
+              this.touch(c.tempId)
+              c.retrying = false
+            })
+            void this.attemptCreate(c)
+          }, this.delays[c.attempts - 1]!)
+          return
+        }
+        c.retrying = false
+        c.error = msg
+        this.setCreateStatus(c, 'failed')
+        this.ev.newFailures.push({ id: c.tempId, error: msg })
+      })
+    }
+  }
+
+  private retryCreate(c: CreateEntry): void {
+    if (c.status !== 'failed') return
+    this.tx(() => {
+      this.touch(c.tempId)
+      c.attempts = 0
+      c.error = undefined
+      this.setCreateStatus(c, 'saving')
+      void this.attemptCreate(c) // same idempotency key: safe even if the first attempt did land
+    })
+  }
+
+  /** Drop an unconfirmed create. (If its response was lost the server may still have it; it then appears via the feed.) */
+  private discardCreate(c: CreateEntry): void {
+    this.tx(() => {
+      this.touch(c.tempId)
+      this.dropCreate(c)
+      this.server.delete(c.tempId)
     })
   }
 
@@ -387,6 +511,8 @@ export class SyncEngine {
 
   /** Retry a failed deal now. A failed bulk write is retried through the single-deal path. */
   retry(id: string): void {
+    const c = this.creates.get(id)
+    if (c) return this.retryCreate(c)
     const e = this.overlay.get(id)
     if (!e || e.status !== 'failed') return
     this.tx(() => {
@@ -409,7 +535,7 @@ export class SyncEngine {
     const byJob = new Map<string, string[]>()
     this.tx(() => {
       for (const id of ids) {
-        const h = this.overlay.get(id)!.writes[0]
+        const h = this.overlay.get(id)?.writes[0]
         if (h?.source === 'bulk' && h.jobId && this.onBulkRetry) (byJob.get(h.jobId) ?? byJob.set(h.jobId, []).get(h.jobId)!).push(id)
         else this.retry(id)
       }
@@ -419,6 +545,8 @@ export class SyncEngine {
   }
   /** Drop every unconfirmed write for a deal; the row falls back to the server's version. */
   revert(id: string): void {
+    const c = this.creates.get(id)
+    if (c) return this.discardCreate(c)
     const e = this.overlay.get(id)
     if (!e) return
     this.tx(() => {
@@ -487,7 +615,7 @@ export class SyncEngine {
       const at = this.now()
       for (const id of ids) {
         const server = this.server.get(id)
-        if (!server) continue
+        if (!server || this.creates.has(id)) continue
         let e = this.overlay.get(id)
         const eff = e ? foldEntry(server, e) : server
         if (!this.prevSnap.has(id)) this.prevSnap.set(id, eff)

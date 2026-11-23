@@ -4,11 +4,11 @@ import { useApp, useAppInstance } from '../state/hooks'
 import { num } from './format'
 import { SyncTray } from './SyncTray'
 
-const VIEWS: { id: ViewId; label: string; key: string }[] = [
-  { id: 'today', label: 'My Today', key: 'G T' },
-  { id: 'mine', label: 'My deals', key: 'G M' },
-  { id: 'all', label: 'All deals', key: 'G A' },
-  { id: 'failed', label: 'Failed', key: 'G F' },
+const VIEWS: { id: ViewId; label: string }[] = [
+  { id: 'today', label: 'Today' },
+  { id: 'mine', label: 'My deals' },
+  { id: 'all', label: 'All deals' },
+  { id: 'failed', label: 'Failed' },
 ]
 
 export function Header() {
@@ -42,7 +42,6 @@ export function Header() {
             role="tab"
             aria-selected={view === v.id}
             className={`tab ${view === v.id ? 'on' : ''}`}
-            title={`Shortcut: ${v.key}`}
             onClick={() => {
               app.setView(v.id)
               app.setUi({ gridFocus: app.ui.gridFocus + 1 })
@@ -58,22 +57,22 @@ export function Header() {
         <input
           ref={input}
           type="search"
-          placeholder="Search deals…   ( / )"
+          placeholder="Search deals…"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault()
               app.setQuery(text.trim())
-              app.setUi({ gridFocus: app.ui.gridFocus + 1 })
+              app.setUi({ zone: 'table', gridFocus: app.ui.gridFocus + 1 })
             }
           }}
         />
       </label>
       <div className="spacer" />
+      <button className="btn primary" onClick={() => app.setUi({ newDealOpen: true })} title="New deal (N)">+ New deal</button>
       {!online && <span className="offline-chip" role="status">Offline</span>}
       <SyncTray />
-      <button className="btn" onClick={() => app.setUi({ helpOpen: true })} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
       <button className="btn" onClick={() => app.setUi({ devOpen: !app.ui.devOpen })} aria-pressed={app.ui.devOpen}>Dev</button>
     </header>
   )

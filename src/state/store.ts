@@ -8,11 +8,13 @@
 import type { Api } from '../api/api'
 import type { FakeServer } from '../api/fakeServer'
 import { SettingsStore, type Settings } from '../api/settings'
-import { stageLabel } from '../domain/stages'
+import { STAGES, adjacentStage, stageLabel } from '../domain/stages'
+import { validateNewDeal, type NewDealInput } from '../domain/newDeal'
+import { moveKind, movePatch, stageMovePatch } from '../domain/patch'
 import type { Deal, DealPatch, SortSpec, StageId, SyncStatus, ViewFilter, ViewId } from '../domain/types'
 import { ME } from '../domain/types'
 import {
-  adjustCounts, defaultSort, emptyScoped, matches, viewFields, type MatchCtx, type ScopedCounts,
+  adjustCounts, defaultSort, emptyCounts, emptyScoped, matches, viewFields, type MatchCtx, type ScopedCounts, type StageCounts,
 } from '../domain/selectors'
 import { SyncEngine, type EngineEvent, type Summary } from '../sync/engine'
 import { BulkRunner, type Job } from '../sync/bulk'
@@ -40,6 +42,12 @@ export interface RowView {
   saved: boolean
   /** A teammate changed a field that would reorder/remove this row; it moves on the next refresh. */
   deferredBy?: number
+}
+
+export interface SelectionSummary {
+  count: number
+  value: number
+  byStage: StageCounts
 }
 
 export interface Toast {
@@ -92,6 +100,11 @@ export class PipelineApp {
   sort: SortSpec = defaultSort('today')
   view: ViewSnapshot = { ids: [], filter: this.filter, sort: this.sort, now: 0, version: 0 }
   counts: ScopedCounts = emptyScoped()
+  /**
+   * Per-stage counts for the current scope when `counts.all/mine` can't answer it (Today, Failed, or a search is active).
+   * Ignores the stage filter, so the rail always shows what each stage click would list. Null otherwise.
+   */
+  scoped: StageCounts | null = null
   deferred: DeferredState = NO_DEFERRED
   selection: Sel.Selection = Sel.EMPTY_SELECTION
   /** Live number of deals matching the selection's filter (for "N selected" in filter mode). */
@@ -105,9 +118,17 @@ export class PipelineApp {
   liveAssertive = ''
   livePolite = ''
   confirm: ConfirmState | null = null
-  ui = { detailOpen: false, paletteOpen: false, helpOpen: false, devOpen: false, trayOpen: false, pickerOpen: false, searchFocus: 0, gridFocus: 0 }
+  ui = {
+    devOpen: false, trayOpen: false, pickerOpen: false, newDealOpen: false, searchFocus: 0, gridFocus: 0,
+    /** Which keyboard zone owns the arrows: the stage rail or the table. */
+    zone: 'table' as 'table' | 'rail',
+    /** Cursor in the rail: 0 = All stages, 1..7 = STAGES[i - 1]. */
+    railIndex: 0,
+  }
   settingsValue: Settings
   undoDepth = 0
+  /** Key whose key-up a dialog wants swallowed (the one that confirmed it); see useKeyboard. */
+  swallowKeyUp: string | null = null
 
   // ---- internals ----
   private listeners = new Set<Listener>()
@@ -187,6 +208,24 @@ export class PipelineApp {
     return this.feed.pollNow()
   }
 
+  /** The filter the rail's counts describe: the current view and search, without the stage. Null when the incremental all/mine counts already are that. */
+  private scopeFilter(): ViewFilter | null {
+    const { view, query } = this.filter
+    if (view === 'mine' || view === 'all') return query ? { view, stage: null, query } : null
+    return { view, stage: null, query }
+  }
+  private computeScoped(ctx: MatchCtx): StageCounts | null {
+    const f = this.scopeFilter()
+    if (!f) return null
+    const c = emptyCounts()
+    for (const d of this.dealsForView()) {
+      if (!matches(d, f, ctx)) continue
+      c[d.stage].count++
+      c[d.stage].value += d.valueInr
+    }
+    return c
+  }
+
   private computeCounts(): ScopedCounts {
     const c = emptyScoped()
     for (const d of this.engine.effectiveDeals()) adjustCounts(c, undefined, d)
@@ -230,6 +269,7 @@ export class PipelineApp {
     this.view = createSnapshot(this.dealsForView(), this.filter, this.sort, ctx, ++this.viewVersion)
     record('view-build', performance.now() - t0, t0, `${this.view.ids.length} rows, ${this.filter.view}`)
     this.vf = viewFields(this.filter, this.sort)
+    this.scoped = this.computeScoped(ctx)
     this.activeId = pinFocus(old.ids, opts.pin === false ? null : this.activeId, this.view.ids)
     if (!opts.keepDeferred) {
       const touched = [...this.deferred.rows.keys()]
@@ -253,6 +293,7 @@ export class PipelineApp {
     this.setFilter({ view, stage: null, query: '' })
   }
   setStageFilter(stage: StageId | null): void {
+    // A stage is a filter on the current view, in every view (Today included).
     this.setFilter({ stage: this.filter.stage === stage ? null : stage })
   }
   setQuery(query: string): void {
@@ -283,8 +324,20 @@ export class PipelineApp {
       }
       for (const ch of ev.changes) adjustCounts(c, ch.prev, ch.next)
       this.counts = c
+      const f = this.scoped && this.scopeFilter()
+      if (f) {
+        const ctx = this.ctx()
+        const sc = emptyCounts()
+        for (const k of Object.keys(sc) as StageId[]) sc[k] = { ...this.scoped![k] }
+        for (const ch of ev.changes) {
+          if (ch.prev && matches(ch.prev, f, ctx)) { sc[ch.prev.stage].count--; sc[ch.prev.stage].value -= ch.prev.valueInr }
+          if (ch.next && matches(ch.next, f, ctx)) { sc[ch.next.stage].count++; sc[ch.next.stage].value += ch.next.valueInr }
+        }
+        this.scoped = sc
+      }
     }
     for (const id of ev.touched) this.rowCache.delete(id)
+    for (const r of ev.replaced) this.swapId(r.from, r.to)
 
     const remoteIds = new Set<string>()
     if (ev.remote.length) this.handleRemote(ev, remoteIds)
@@ -294,7 +347,7 @@ export class PipelineApp {
       const gone = new Set<string>()
       for (const ch of ev.changes) {
         if (remoteIds.has(ch.id) || !snapshotHas(this.view, ch.id)) continue
-        if (!matches(ch.next, this.filter, this.ctx())) gone.add(ch.id)
+        if (!ch.next || !matches(ch.next, this.filter, this.ctx())) gone.add(ch.id)
       }
       if (gone.size) this.removeFromView(gone)
     } else if (
@@ -337,6 +390,31 @@ export class PipelineApp {
       const ee = entering ?? this.deferred.entering
       this.deferred = { rows: rr, entering: ee, count: rr.size + ee.size }
     }
+  }
+
+  /** A created deal got its real id: keep its place in the list, the focus and the selection. */
+  private swapId(from: string, to: string): void {
+    if (snapshotHas(this.view, from)) {
+      this.view = snapshotHas(this.view, to)
+        ? removeIds(this.view, new Set([from]))
+        : { ...this.view, ids: this.view.ids.map((id) => (id === from ? to : id)), set: undefined }
+    }
+    if (this.activeId === from) this.activeId = to
+    if (this.anchorId === from) this.anchorId = to
+    const sel = this.selection
+    if (sel.kind === 'ids' && sel.ids.has(from)) {
+      const ids = new Set(sel.ids)
+      ids.delete(from)
+      ids.add(to)
+      this.selection = { kind: 'ids', ids }
+    } else if (sel.kind === 'filter' && sel.excluded.has(from)) {
+      const excluded = new Set(sel.excluded)
+      excluded.delete(from)
+      excluded.add(to)
+      this.selection = { kind: 'filter', filter: sel.filter, excluded }
+    }
+    this.rowCache.delete(from)
+    this.rowCache.delete(to)
   }
 
   private removeFromView(gone: ReadonlySet<string>): void {
@@ -432,6 +510,24 @@ export class PipelineApp {
     this.emit()
   }
 
+  // ---- keyboard zones ----
+  setZone(zone: 'table' | 'rail', railIndex?: number): void {
+    if (zone === 'rail' && railIndex === undefined) {
+      const at = this.filter.stage ? STAGES.findIndex((s) => s.id === this.filter.stage) + 1 : 0
+      railIndex = at
+    }
+    this.setUi({ zone, railIndex: railIndex ?? this.ui.railIndex })
+    this.say(zone === 'rail' ? 'Stage list' : 'Deals table')
+  }
+  moveRail(delta: number): void {
+    this.setUi({ railIndex: Math.max(0, Math.min(STAGES.length, this.ui.railIndex + delta)) })
+  }
+  /** Space in the rail: apply (or clear) the stage under the cursor. */
+  activateRail(): void {
+    const i = this.ui.railIndex
+    this.setStageFilter(i === 0 ? null : STAGES[i - 1]!.id)
+  }
+
   // ---- cursor and selection ----
   activeIndex(): number {
     return this.activeId === null ? -1 : this.view.ids.indexOf(this.activeId)
@@ -499,6 +595,29 @@ export class PipelineApp {
   selectedCount(): number {
     return Sel.selectionCount(this.selection, this.selMatching)
   }
+  /** What the detail panel shows for a multi-selection. Cached per selection and data version so selectors stay stable. */
+  selectionSummary(): SelectionSummary | null {
+    const n = this.selectedCount()
+    if (n === 0) return null
+    const c = this.sumCache
+    if (c && c.sel === this.selection && c.counts === this.counts && c.n === n) return c.value
+    const byStage = emptyCounts()
+    const sel = this.selection
+    const deals: Iterable<Deal | undefined> =
+      sel.kind === 'ids' ? [...sel.ids].map((id) => this.engine.effective(id)) : Sel.materialize(sel, this.dealsForView(), this.ctx()).map((id) => this.engine.effective(id))
+    let value = 0
+    for (const d of deals) {
+      if (!d) continue
+      byStage[d.stage].count++
+      byStage[d.stage].value += d.valueInr
+      value += d.valueInr
+    }
+    const out = { count: n, value, byStage }
+    this.sumCache = { sel: this.selection, counts: this.counts, n, value: out }
+    return out
+  }
+  private sumCache: { sel: Sel.Selection; counts: ScopedCounts; n: number; value: SelectionSummary } | null = null
+
   /** Live number of deals matching the current filter (may exceed the snapshot when teammates added rows). */
   countMatching(): number {
     let n = 0
@@ -508,6 +627,36 @@ export class PipelineApp {
   }
 
   // ---- moves ----
+  // Every stage change is built by `movePatch` (domain/patch.ts): closing clears the next step, reopening sets
+  // defaults, and the inverse patch used by undo restores all of it. Groups below share one patch each, so a
+  // 10,000-deal job still sends a handful of distinct patches.
+
+  /** Split deals into groups that can share one patch, given where each one is going (null = skip it). */
+  private planMove(ids: Iterable<string>, target: (d: Deal) => StageId | null): { patch: DealPatch; ids: string[]; to: StageId }[] {
+    const now = this.now()
+    const groups = new Map<string, { patch: DealPatch; ids: string[]; to: StageId }>()
+    for (const id of ids) {
+      const d = this.engine.effective(id)
+      const to = d && !this.engine.isCreating(id) ? target(d) : null
+      if (!d || !to || to === d.stage) continue
+      const kind = moveKind(d.stage, to)
+      const key = `${to}:${kind}`
+      let g = groups.get(key)
+      if (!g) groups.set(key, (g = { patch: movePatch(kind, to, now), ids: [], to }))
+      g.ids.push(id)
+    }
+    return [...groups.values()]
+  }
+
+  /** Dispatch planned moves: tracked per deal when small, one cancellable job when large. */
+  private dispatchMoves(groups: { patch: DealPatch; ids: string[]; to: StageId }[], label: string, jobLabel: string): void {
+    const total = groups.reduce((n, g) => n + g.ids.length, 0)
+    if (total <= SMALL_BATCH) this.moveMany(groups, label)
+    else this.startBulk(jobLabel, groups, total)
+    // The move is dispatched: the selection is spent, even if some selected deals had nowhere to go.
+    this.clearSelection()
+  }
+
   /** Move the selection (or the focused row) to a stage. Large moves become cancellable bulk jobs. */
   moveTo(stage: StageId): void {
     const hasSel = this.selectedCount() > 0
@@ -516,22 +665,15 @@ export class PipelineApp {
       this.moveOne(this.activeId, stage)
       return
     }
-    const ctx = this.ctx()
-    const all = Sel.materialize(this.selection, this.dealsForView(), ctx)
-    const ids = all.filter((id) => this.engine.effective(id)?.stage !== stage)
+    const all = Sel.materialize(this.selection, this.dealsForView(), this.ctx())
+    const groups = this.planMove(all, () => stage)
+    const ids = groups.flatMap((g) => g.ids)
     if (!ids.length) {
       this.toast({ kind: 'info', message: `Already in ${stageLabel(stage)}` })
       return
     }
-    if (ids.length <= SMALL_BATCH) {
-      this.moveMany(ids, stage)
-      this.clearSelection()
-      return
-    }
-    const run = () => {
-      this.startBulkMove(ids, stage)
-      this.clearSelection()
-    }
+    const n = ids.length.toLocaleString('en-IN')
+    const run = () => this.dispatchMoves(groups, `${n} deals → ${stageLabel(stage)}`, `Move ${n} deals to ${stageLabel(stage)}`)
     if (stage === 'lost' && ids.length > CONFIRM_LOST_ABOVE) {
       const byStage = new Map<StageId, number>()
       let value = 0
@@ -541,13 +683,13 @@ export class PipelineApp {
         value += d.valueInr
       }
       this.confirm = {
-        title: `Move ${ids.length.toLocaleString('en-IN')} deals to Lost?`,
+        title: `Move ${n} deals to Lost?`,
         lines: [
-          ...[...byStage].map(([s, n]) => `${n.toLocaleString('en-IN')} from ${stageLabel(s)}`),
+          ...[...byStage].map(([s, c]) => `${c.toLocaleString('en-IN')} from ${stageLabel(s)}`),
           `Total value ${inr(value)}`,
           'You can cancel the job or undo it afterwards.',
         ],
-        confirmLabel: `Move ${ids.length.toLocaleString('en-IN')} to Lost`,
+        confirmLabel: `Move ${n} to Lost`,
         run,
       }
       this.emit()
@@ -567,7 +709,11 @@ export class PipelineApp {
   moveOne(id: string, stage: StageId): void {
     const d = this.engine.effective(id)
     if (!d) return
-    const res = this.engine.edit(id, { stage })
+    if (this.engine.isCreating(id)) {
+      this.toast({ kind: 'info', message: 'Still saving this new deal. Try again in a moment.' })
+      return
+    }
+    const res = this.engine.edit(id, stageMovePatch(d, stage, this.now()))
     if (!res) {
       this.toast({ kind: 'info', message: `Already in ${stageLabel(stage)}` })
       return
@@ -577,29 +723,69 @@ export class PipelineApp {
     this.toast({ kind: 'success', message: `${d.name} → ${stageLabel(stage)}`, action: { label: 'Undo', run: () => this.undoItem(item) } })
   }
 
-  private moveMany(ids: string[], stage: StageId): void {
+  /** L / J: move the selection (or the focused deal) one stage along or back. Each deal moves from its own stage. */
+  moveRelative(dir: 1 | -1): void {
+    const hasSel = this.selectedCount() > 0
+    const ids = hasSel ? Sel.materialize(this.selection, this.dealsForView(), this.ctx()) : this.activeId !== null ? [this.activeId] : []
+    const groups = this.planMove(ids, (d) => adjacentStage(d.stage, dir))
+    const total = groups.reduce((n, g) => n + g.ids.length, 0)
+    if (!total) {
+      if (ids.length) this.toast({ kind: 'info', message: dir === 1 ? 'Nothing to advance: already in the last open stage, or closed.' : 'Nothing to move back: already in the first stage.' })
+      return
+    }
+    if (total === 1) {
+      this.moveOne(groups[0]!.ids[0]!, groups[0]!.to)
+      // The move is dispatched: the selection is spent, even if the other selected deals had nowhere to go.
+      if (hasSel) this.clearSelection()
+      return
+    }
+    this.dispatchMoves(groups, `${total} deals moved ${dir === 1 ? 'forward' : 'back'}`, `Move ${total.toLocaleString('en-IN')} deals ${dir === 1 ? 'forward' : 'back'} one stage`)
+  }
+
+  private moveMany(groups: { patch: DealPatch; ids: string[]; to: StageId }[], label: string): void {
     const items: { id: string; patch: DealPatch }[] = []
     this.engine.batch(() => {
-      for (const id of ids) {
-        const r = this.engine.edit(id, { stage })
-        if (r) items.push({ id, patch: r.inverse })
+      for (const g of groups) {
+        for (const id of g.ids) {
+          const r = this.engine.edit(id, g.patch)
+          if (r) items.push({ id, patch: r.inverse })
+        }
       }
     })
     if (!items.length) return
-    const item: UndoItem = { kind: 'edit', label: `${items.length} deals → ${stageLabel(stage)}`, items }
+    const item: UndoItem = { kind: 'edit', label, items }
     this.pushUndo(item)
     this.toast({ kind: 'success', message: item.label, action: { label: 'Undo', run: () => this.undoItem(item) } })
   }
 
   startBulkMove(ids: string[], stage: StageId): Job {
-    const label = `Move ${ids.length.toLocaleString('en-IN')} deals to ${stageLabel(stage)}`
+    const groups = this.planMove(ids, () => stage)
+    return this.startBulk(`Move ${ids.length.toLocaleString('en-IN')} deals to ${stageLabel(stage)}`, groups, ids.length)
+  }
+
+  private startBulk(label: string, groups: { patch: DealPatch; ids: string[] }[], count: number): Job {
     const t0 = performance.now()
-    const job = this.runner.start(label, [{ patch: { stage }, ids }])
-    record('bulk-optimistic-apply', performance.now() - t0, t0, `${ids.length} deals`)
+    const job = this.runner.start(label, groups.map((g) => ({ patch: g.patch, ids: g.ids })))
+    record('bulk-optimistic-apply', performance.now() - t0, t0, `${count} deals`)
     measureToPaint('bulk-apply-to-paint', t0)()
     this.pushUndo({ kind: 'job', label, jobId: job.id })
     this.say(`${label} started`)
     return job
+  }
+
+  /** Create a New Lead. It appears at once under a temporary id; the sync engine confirms, retries or fails it like a move. */
+  createDeal(input: NewDealInput): string | null {
+    if (validateNewDeal(input)) return null
+    const id = this.engine.create(input)
+    // Make sure the user sees it: if the current list wouldn't include it, go where New Leads live.
+    if (matches(this.engine.effective(id)!, this.filter, this.ctx(this.now()))) this.rebuildView({ pin: false })
+    else this.setFilter({ view: 'mine', stage: 'new', query: '' })
+    this.activeId = id
+    this.ui = { ...this.ui, zone: 'table', gridFocus: this.ui.gridFocus + 1 }
+    this.toast({ kind: 'success', message: `Created ${input.name.trim()} in New Lead` })
+    this.say(`Created ${input.name.trim()}`)
+    this.emit()
+    return id
   }
 
   /** Edit one field of one deal (detail panel). */

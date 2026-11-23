@@ -25,10 +25,10 @@ export function BulkBar() {
         <button className="btn small" onClick={() => app.clearSelection()}>Clear (Esc)</button>
       </div>
       <div className="bulk-main">
-        <span className="muted">Move to:</span>
+        <button className="btn small primary" onMouseDown={(e) => e.preventDefault()} onClick={() => app.setUi({ pickerOpen: true })}>Move to… <kbd>K</kbd></button>
         {STAGES.map((s) => (
-          <button key={s.id} className="btn small" onClick={() => app.moveTo(s.id)} title={`Press ${s.key}`}>
-            <kbd>{s.key}</kbd> {s.label}
+          <button key={s.id} className="btn small" onMouseDown={(e) => e.preventDefault()} onClick={() => app.moveTo(s.id)}>
+            {s.label}
           </button>
         ))}
       </div>

@@ -32,7 +32,7 @@ describe('single-deal writes', () => {
   it('returns the inverse patch and ignores no-op edits', () => {
     const d = pickDeal('new')
     expect(env.engine.edit(d.id, { stage: 'new' })).toBeNull()
-    expect(env.engine.edit(d.id, { stage: 'won' })!.inverse).toEqual({ stage: 'new' })
+    expect(env.engine.edit(d.id, { stage: 'won' })!.inverse).toEqual({ stage: 'new', stageEnteredAt: d.stageEnteredAt }) // undo also restores the entry date
   })
 
   it('auto-retries twice (400ms, 1200ms) and then marks the deal failed', async () => {
@@ -180,5 +180,214 @@ describe('remote changes', () => {
     env.engine.edit(d.id, { stage: 'won' })
     env.engine.applyRemote([{ seq: 1, deal: { ...d, valueInr: 5, version: d.version + 1, updatedBy: 4 } }])
     expect(env.engine.effective(d.id)).toMatchObject({ stage: 'won', valueInr: 5 })
+  })
+})
+
+describe('creating deals', () => {
+  const input = { name: '  Zeta Labs ', valueInr: 640_000, licences: 12 }
+
+  it('shows the deal at once under a temporary id, then swaps in the server row and id', async () => {
+    const before = env.server.size
+    const tmp = env.engine.create(input)
+    expect(tmp).toMatch(/^tmp-/)
+    const d = env.engine.effective(tmp)!
+    expect([d.name, d.stage, d.ownerId, d.valueInr, d.licences]).toEqual(['Zeta Labs', 'new', 0, 640_000, 12])
+    expect(env.engine.syncOf(tmp)!.status).toBe('saving')
+    expect(env.engine.isCreating(tmp)).toBe(true)
+    expect(events[0]!.changes).toEqual([{ id: tmp, prev: undefined, next: d }])
+    await settle()
+    expect(env.engine.effective(tmp)).toBeUndefined()
+    expect(env.engine.syncOf(tmp)).toBeUndefined()
+    const ev = events.find((e) => e.replaced.length)!
+    const real = ev.replaced[0]!.to
+    expect(ev.replaced[0]!.from).toBe(tmp)
+    expect(real).toMatch(/^D-/)
+    expect(env.engine.effective(real)!.version).toBe(1)
+    expect(env.server.size).toBe(before + 1)
+    expect(env.engine.summary().pending).toBe(0)
+    expect(ev.changes.find((c) => c.id === tmp)).toMatchObject({ next: undefined }) // counts can drop the temp row
+  })
+
+  it('cannot be edited or bulk-moved until it has a real id', () => {
+    const tmp = env.engine.create(input)
+    expect(env.engine.edit(tmp, { stage: 'won' })).toBeNull()
+    expect(env.engine.applyBulk('j', [tmp], { stage: 'won' }).size).toBe(0)
+    expect(env.engine.effective(tmp)!.stage).toBe('new')
+  })
+
+  it('retries twice, then fails visibly; Retry succeeds without creating a duplicate', async () => {
+    const before = env.server.size
+    env.server.failNext(3, 'rejected')
+    const tmp = env.engine.create(input)
+    await settle(400)
+    expect(env.engine.syncOf(tmp)).toMatchObject({ status: 'saving', retrying: true })
+    await settle(1200)
+    expect(env.engine.syncOf(tmp)!.status).toBe('failed')
+    expect(env.engine.problems.has(tmp)).toBe(true)
+    expect(env.engine.summary()).toMatchObject({ failed: 1, pending: 1 })
+    expect(events.some((e) => e.newFailures.some((f) => f.id === tmp))).toBe(true)
+    expect(env.server.size).toBe(before)
+    env.engine.retry(tmp)
+    await settle()
+    expect(env.engine.effective(tmp)).toBeUndefined()
+    expect(env.server.size).toBe(before + 1)
+    expect(env.engine.problems.size).toBe(0)
+    expect(env.engine.summary().pending).toBe(0)
+  })
+
+  it('a lost response is retried with the same key: the server creates exactly one deal', async () => {
+    const before = env.server.size
+    env.server.failNext(1, 'lost')
+    env.engine.create(input)
+    await settle(400)
+    await settle()
+    expect(env.server.size).toBe(before + 1)
+    expect(events.flatMap((e) => e.replaced)).toHaveLength(1)
+    expect(env.engine.summary().pending).toBe(0)
+  })
+
+  it('Revert on a failed create removes the optimistic row', async () => {
+    env.server.failNext(3, 'rejected')
+    const tmp = env.engine.create(input)
+    await settle(2000)
+    env.engine.revert(tmp)
+    expect(env.engine.effective(tmp)).toBeUndefined()
+    expect(env.engine.problems.size).toBe(0)
+    expect(env.engine.summary().pending).toBe(0)
+    expect(events.at(-1)!.changes).toEqual([expect.objectContaining({ id: tmp, next: undefined })])
+  })
+
+  it('never duplicates the deal when the change feed also delivers it', async () => {
+    const tmp = env.engine.create(input)
+    const real = env.server.peek(`D-${String(env.server.size + 1).padStart(5, '0')}`)
+    expect(real).toBeUndefined() // not created yet: the request is still in flight
+    await settle()
+    const { changes } = await env.server.changesSince(0)
+    env.engine.applyRemote(changes) // idempotent: the confirmed row is already there
+    expect([...env.engine.effectiveDeals()].filter((d) => d.name === 'Zeta Labs')).toHaveLength(1)
+    expect(env.engine.effective(tmp)).toBeUndefined()
+  })
+})
+
+describe('Dev scenarios (armed for "the next save")', () => {
+  const log = () => env.server.getDev().log
+  /** Attempts of the (single) request in the log, oldest first, e.g. ['1:failed', '2:ok']. */
+  const outcomes = (_id: string) => log().map((l) => `${l.attempt}:${l.outcome}`).reverse()
+  const open = (n: number) => env.deals.filter((d) => d.stage === 'new').slice(0, n)
+
+  it('Fail next save (all retries): every automatic attempt fails, it ends Not saved and listed as a problem; Retry then saves it once', async () => {
+    const [d] = open(1)
+    const applied0 = env.server.stats.applied
+    env.server.armFailAll()
+    expect(env.server.getDev().armed).toEqual(['Armed: the next save will fail on every attempt (ends Not saved)'])
+    env.engine.edit(d!.id, { stage: 'contacted' })
+    await settle(0)
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'saving', retrying: true }) // attempt 1 failed, waiting to retry
+    await settle(400) // attempt 2
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'saving', retrying: true })
+    await settle(1200) // attempt 3: out of automatic retries
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'failed' })
+    expect([...env.engine.problems]).toEqual([d!.id]) // what the Failed view and tray list
+    expect(env.engine.summary()).toMatchObject({ failed: 1, pending: 1 })
+    expect(events.flatMap((e) => e.newFailures).map((f) => f.id)).toEqual([d!.id])
+    expect(env.engine.effective(d!.id)!.stage).toBe('contacted') // the intent stays on screen
+    expect(env.server.peek(d!.id)!.stage).toBe('new') // ... but the server never applied it
+    expect(env.server.stats.applied).toBe(applied0)
+    expect(outcomes(d!.id)).toEqual(['1:failed', '2:failed', '3:failed'])
+    expect(log().every((l) => l.cause === 'scenario')).toBe(true)
+    expect(env.server.getDev().armed).toEqual([]) // consumed
+
+    env.engine.retry(d!.id) // a manual Retry is not failed again
+    await settle(0)
+    expect(env.engine.syncOf(d!.id)).toBeUndefined()
+    expect(env.engine.problems.size).toBe(0)
+    expect(env.server.peek(d!.id)).toMatchObject({ stage: 'contacted', version: d!.version + 1 })
+    expect(env.server.stats.applied).toBe(applied0 + 1) // applied once
+    expect(log()[0]).toMatchObject({ attempt: 4, outcome: 'ok' })
+  })
+
+  it('Fail next attempt (retry recovers): one attempt fails, the quiet retry succeeds, it is never Not saved', async () => {
+    const [d] = open(1)
+    const applied0 = env.server.stats.applied
+    env.server.armFailOnce()
+    env.engine.edit(d!.id, { stage: 'contacted' })
+    await settle(0)
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'saving', retrying: true })
+    await settle(400)
+    expect(env.engine.syncOf(d!.id)).toBeUndefined()
+    expect(env.engine.problems.size).toBe(0)
+    expect(events.flatMap((e) => e.newFailures)).toEqual([])
+    expect(env.server.peek(d!.id)).toMatchObject({ stage: 'contacted', version: d!.version + 1 })
+    expect(env.server.stats.applied).toBe(applied0 + 1)
+    expect(outcomes(d!.id)).toEqual(['1:failed', '2:ok'])
+    expect(env.server.getDev().armed).toEqual([])
+  })
+
+  it('Response lost on next save: applied, the response is lost, the retry replays it; saved once, no double-apply', async () => {
+    const [d] = open(1)
+    const applied0 = env.server.stats.applied
+    env.server.armResponseLost()
+    env.engine.edit(d!.id, { stage: 'contacted' })
+    await settle(0)
+    expect(env.server.peek(d!.id)!.stage).toBe('contacted') // the server DID apply it
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'saving', retrying: true }) // the client does not know
+    await settle(400)
+    expect(env.engine.syncOf(d!.id)).toBeUndefined()
+    expect(env.engine.problems.size).toBe(0)
+    expect(env.server.stats.applied).toBe(applied0 + 1)
+    expect(env.server.peek(d!.id)!.version).toBe(d!.version + 1) // not bumped twice
+    expect(outcomes(d!.id)).toEqual(['1:response lost', '2:replayed'])
+    expect(env.engine.effective(d!.id)!.stage).toBe('contacted')
+  })
+
+  it('only the next save is affected: reads never consume an armed scenario, and other deals save normally', async () => {
+    const [a, b] = open(2)
+    env.server.armFailAll()
+    await env.server.changesSince(0) // polling
+    await env.server.listDeals(() => {}) // loading
+    expect(env.server.getDev().armed).toHaveLength(1) // still armed
+    env.engine.edit(a!.id, { stage: 'contacted' }) // the next save: binds to it
+    env.engine.edit(b!.id, { stage: 'contacted' }) // a different deal, sent right after
+    await settle(2000)
+    expect(env.engine.syncOf(a!.id)).toMatchObject({ status: 'failed' })
+    expect(env.engine.syncOf(b!.id)).toBeUndefined()
+    expect(env.server.peek(b!.id)!.stage).toBe('contacted')
+    expect(env.server.peek(a!.id)!.stage).toBe('new')
+  })
+
+  it('scenarios queue: each one binds to a different save, in order', async () => {
+    const [a, b, c] = open(3)
+    env.server.armFailAll()
+    env.server.armFailOnce()
+    for (const d of [a, b, c]) env.engine.edit(d!.id, { stage: 'contacted' })
+    await settle(2000)
+    expect(env.engine.syncOf(a!.id)).toMatchObject({ status: 'failed' }) // fail-all
+    expect(env.engine.syncOf(b!.id)).toBeUndefined() // fail-once recovered
+    expect(env.server.peek(b!.id)!.stage).toBe('contacted')
+    expect(env.server.peek(c!.id)!.stage).toBe('contacted') // nothing was armed for the third
+    expect(env.engine.problems.size).toBe(1)
+  })
+
+  it('the request log shows deal, attempt number and outcome (ok / failed / response lost / conflict), newest first, at most 10', async () => {
+    const d = open(12)
+    for (const x of d) env.engine.edit(x.id, { stage: 'contacted' })
+    await settle(10)
+    expect(log()).toHaveLength(10)
+    expect(log()[0]!.n).toBeGreaterThan(log()[9]!.n)
+    expect(log().every((l) => l.kind === 'save' && l.attempt === 1 && l.outcome === 'ok' && l.label.includes('→ contacted'))).toBe(true)
+    env.server.interfereNext('same') // a teammate edits the same field first: the save is a conflict
+    const [e] = env.deals.filter((x) => x.stage === 'demo')
+    env.engine.edit(e!.id, { stage: 'won' })
+    await settle(10)
+    expect(log()[0]).toMatchObject({ outcome: 'conflict', attempt: 1 })
+  })
+
+  it('the Failure rate slider still works and is labelled random', async () => {
+    env.settings.set({ failureRate: 1, lostResponseShare: 0 })
+    const [d] = open(1)
+    env.engine.edit(d!.id, { stage: 'contacted' })
+    await settle(2000)
+    expect(env.engine.syncOf(d!.id)).toMatchObject({ status: 'failed' })
+    expect(log().every((l) => l.cause === 'random' && l.outcome === 'failed')).toBe(true)
   })
 })
